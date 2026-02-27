@@ -7,7 +7,8 @@ from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
 from string import Template
-from typing import Any, Literal, TypedDict, cast
+import csv
+from typing import Any, Literal, TypedDict, cast, Callable
 from collections.abc import Sequence
 import warnings
 
@@ -46,6 +47,13 @@ SQLITE_BACKEND_KWARGS = {"in_memory"}
 CHECK_QUERY = "SELECT 1 FROM ${schema} ${where_clause}"
 PLEXOS_DEFAULT_SCHEMA = fpath = files("plexosdb").joinpath("schema.sql").read_text(encoding="utf-8-sig")
 PROPERTY_QUERY = files("plexosdb.queries").joinpath("object_properties.sql").read_text(encoding="utf-8-sig")
+PROPERTY_QUERY_ALT = files("plexosdb.queries").joinpath("table_properties.sql").read_text(encoding="utf-8-sig")
+OBJECTS_QUERY = files("plexosdb.queries").joinpath("table_objects.sql").read_text(encoding="utf-8-sig")
+CATEGORIES_QUERY = files("plexosdb.queries").joinpath("table_categories.sql").read_text(encoding="utf-8-sig")
+MEMBERSHIPS_QUERY = files("plexosdb.queries").joinpath("table_memberships.sql").read_text(encoding="utf-8-sig")
+ATTRIBUTES_QUERY = files("plexosdb.queries").joinpath("table_attributes.sql").read_text(encoding="utf-8-sig")
+REPORTS_QUERY = files("plexosdb.queries").joinpath("table_reports.sql").read_text(encoding="utf-8-sig")
+CONFIG_QUERY = files("plexosdb.queries").joinpath("table_config.sql").read_text(encoding="utf-8-sig")
 
 
 class PropertyRecord(TypedDict, total=False):
@@ -140,6 +148,125 @@ class PlexosDB:
         if not result:
             return None
         return tuple(map(int, result[0].split(".")))
+
+    def get_objects_table(
+        self,
+        /,
+        *,
+        class_enum: ClassEnum | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return objects as a table-like list of dicts.
+
+        Each row contains the keys: ``class_name``, ``GUID``, ``name``, ``category``, ``description``.
+
+        Parameters
+        ----------
+        class_enum : ClassEnum | None, optional
+            If provided, only return objects belonging to this class.
+
+        Returns
+        -------
+        list[dict]
+            List of dictionaries representing objects.
+
+        Examples
+        --------
+        >>> db = PlexosDB()
+        >>> db.create_schema()
+        >>> db.add_object(ClassEnum.Generator, "GenA", description="Unit A")
+        >>> db.get_objects_table(ClassEnum.Generator)
+        [{'class_name': 'Generator', 'GUID': '...', 'name': 'GenA', 'category': '-', 'description': 'Unit A'}]
+        """
+        params: dict[str, Any] = {}
+        where_clause = ""
+        if class_enum is not None:
+            where_clause = "WHERE c.name = :class_name"
+            params["class_name"] = class_enum
+
+        query = Template(OBJECTS_QUERY).safe_substitute(where_clause=where_clause)
+        result = self._db.fetchall_dict(query, params if params else None)
+        return result or []
+
+    def get_categories_table(self, /, *, class_enum: ClassEnum | None = None) -> list[dict[str, Any]]:
+        """Return categories as rows of (class, category, rank).
+
+        Columns: class, category, rank
+        """
+        params: dict[str, Any] = {}
+        where_clause = ""
+        if class_enum is not None:
+            where_clause = "WHERE c.name = :class_name"
+            params["class_name"] = class_enum
+
+        query = Template(CATEGORIES_QUERY).safe_substitute(where_clause=where_clause)
+        result = self._db.fetchall_dict(query, params if params else None)
+        return result or []
+
+    def get_memberships_table(self) -> list[dict[str, Any]]:
+        """Return memberships as rows with parent/child/collection/parent_object/child_object.
+
+        Columns: parent_class, child_class, collection, parent_object, child_object
+        """
+        query = Template(MEMBERSHIPS_QUERY).safe_substitute(where_clause="")
+        result = self._db.fetchall_dict(query)
+        return result or []
+
+    def get_attributes_table(self) -> list[dict[str, Any]]:
+        """Return attributes table rows.
+
+        Columns: name, class, attribute, value, attribute_enum_id, base_class_id
+        Note: attribute_enum_id and base_class_id are read from t_attribute.enum_id and t_class.inherits_from
+        """
+        params: dict[str, Any] = {}
+        where_clause = ""
+        query = Template(ATTRIBUTES_QUERY).safe_substitute(where_clause=where_clause)
+        result = self._db.fetchall_dict(query, None)
+        return result or []
+
+    def get_properties_table(self, /, *, child_object: str | None = None) -> list[dict[str, Any]]:
+        """Return properties as rows matching requested columns.
+
+        Columns: parent_class, child_class, collection, parent_object, child_object, property, unit, band_id, value, date_from, date_to, pattern, action, expression, filename, scenario, memo
+
+        Parameters
+        ----------
+        child_object : str | None
+            If provided, filter properties to only those for the given child object name.
+        """
+        where_clause = ""
+        params: dict[str, Any] = {}
+        if child_object:
+            where_clause = "WHERE child_obj.name = :child_object"
+            params["child_object"] = child_object
+
+        # Use the external property query loaded at module import and substitute a where clause
+        query = Template(PROPERTY_QUERY_ALT).safe_substitute(where_clause=where_clause)
+        result = self._db.fetchall_dict(query, params if params else None)
+        return result or []
+
+    def get_reports_table(self, /, *, object_name: str | None = None) -> list[dict[str, Any]]:
+        """Return reports table rows with object, parent_class, child_class, collection, property, phase_id and flags.
+
+        Parameters
+        ----------
+        object_name: str | None
+            If provided, filter reports to the given report profile name (t_object.name)
+        """
+        params: dict[str, Any] = {}
+        where_clause = ""
+        if object_name:
+            where_clause = "WHERE to2.name = :object_name"
+            params["object_name"] = object_name
+
+        query = Template(REPORTS_QUERY).safe_substitute(where_clause=where_clause)
+        result = self._db.fetchall_dict(query, params if params else None)
+        return result or []
+
+    def get_config_table(self) -> list[dict[str, Any]]:
+        """Return configuration as Name/Value rows from t_config."""
+        query = Template(CONFIG_QUERY).safe_substitute(where_clause="")
+        result = self._db.fetchall_dict(query)
+        return result or []
 
     @classmethod
     def from_xml(
@@ -4150,7 +4277,115 @@ class PlexosDB:
 
     def to_csv(self, target_path: str | Path, /, *, tables: list[str] | None = None) -> None:
         """Export selected tables or the entire database to CSV files."""
-        raise NotImplementedError  # pragma: no cover
+        
+        out_base = Path(target_path)
+        out_dir = out_base
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Define which logical tables to export and how to get their rows
+        table_funcs: dict[str, Callable[[], list[dict[str, Any]]]] = {
+            "Objects": lambda: self.get_objects_table(),
+            "Categories": lambda: self.get_categories_table(),
+            "Memberships": lambda: self.get_memberships_table(),
+            "CustomColumns": lambda: [],
+            "Attributes": lambda: self.get_attributes_table(),
+            "Properties": lambda: self.get_properties_table(),
+            "Reports": lambda: self.get_reports_table(),
+            "Config": lambda: self.get_config_table(),
+        }
+
+        # Default ordered list
+        default_tables = [
+            "Objects",
+            "Categories",
+            "Memberships",
+            "CustomColumns",
+            "Attributes",
+            "Properties",
+            "Reports",
+            "Config",
+        ]
+
+        export_tables = tables if tables is not None else default_tables
+
+        # Header fallbacks when there are no rows
+        headers_map: dict[str, list[str]] = {
+            "Objects": ["class_name", "GUID", "name", "category", "description"],
+            "Categories": ["class", "category", "rank"],
+            "Memberships": ["parent_class", "child_class", "collection", "parent_object", "child_object"],
+            "CustomColumns": ["class", "object", "column", "guid", "position", "value"],
+            "Attributes": ["name", "class", "attribute", "value", "attribute_enum_id", "base_class_id"],
+            "Properties": [
+                "parent_class",
+                "child_class",
+                "collection",
+                "parent_object",
+                "child_object",
+                "property",
+                "unit",
+                "band_id",
+                "value",
+                "date_from",
+                "date_to",
+                "pattern",
+                "action",
+                "expression",
+                "filename",
+                "scenario",
+                "memo",
+            ],
+            "Reports": [
+                "object",
+                "parent_class",
+                "child_class",
+                "collection",
+                "property",
+                "phase_id",
+                "report_period",
+                "report_summary",
+                "report_statistics",
+                "report_samples",
+                "write_flat_files",
+            ],
+            "Config": ["Name", "Value"],
+        }
+
+        for table_name in export_tables:
+            if table_name not in table_funcs:
+                # skip unknown table names
+                print(f"Unknown table: {table_name}")
+                continue
+
+            try:
+                rows = table_funcs[table_name]() or []
+            except Exception:
+                rows = []
+
+            # Post-fetch filters requested by user
+            if table_name == "Objects":
+                # Exclude System class objects
+                rows = [r for r in rows if str(r.get("class_name")) != str(ClassEnum.System)]
+            if table_name == "Categories":
+                # Exclude placeholder category '-'
+                rows = [r for r in rows if r.get("category") != "-"]
+
+            # Determine headers
+            if rows:
+                # preserve insertion order of keys from first row
+                headers = list(rows[0].keys())
+            else:
+                headers = headers_map.get(table_name, [])
+
+            out_file = out_dir / f"{table_name}.csv"
+            with out_file.open("w", newline="", encoding="utf-8-sig") as fh:
+                writer = csv.DictWriter(fh, fieldnames=headers, extrasaction="ignore")
+                writer.writeheader()
+                for r in rows:
+                    # convert None to empty string for CSV readability
+                    safe_row = {k: ("" if v is None else v) for k, v in r.items()}
+                    writer.writerow(safe_row)
+
+        return None
 
     def to_xml(self, target_path: str | Path) -> bool:
         """Convert SQLite to XML format.
