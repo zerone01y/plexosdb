@@ -4427,17 +4427,50 @@ class PlexosDB:
         self._db.connection.row_factory = previous_row_factory
         return True
 
+    def _update_attribute(
+            self,
+            new_value: str | float | int,
+            attribute_id: int,
+            object_id: int,
+    ) -> int | None:
+        """Low-level attribute upsert: SELECT -> UPDATE or INSERT.
+
+        Returns the attribute_data_id for the updated/inserted row or None on unexpected failure.
+        """
+        # Check if an attribute_data row already exists
+        row = self._db.fetchone(
+            "SELECT attribute_data_id FROM t_attribute_data WHERE object_id = ? AND attribute_id = ?",
+            (object_id, attribute_id),
+        )
+        if row:
+            attribute_data_id = int(row[0])
+            update_q = "UPDATE t_attribute_data SET value = ? WHERE attribute_data_id = ?"
+            self._db.execute(update_q, (new_value, attribute_data_id))
+            return attribute_data_id
+
+        # No existing row: insert a new one
+        insert_q = "INSERT INTO t_attribute_data (object_id, attribute_id, value) VALUES (?, ?, ?)"
+        self._db.execute(insert_q, (object_id, attribute_id, new_value))
+        return self._db.last_insert_rowid()
+    
     def update_attribute(
         self,
-        attribute_name: str,
         new_value: str | float | int,
         /,
         *,
+        attribute_name: str,
         object_name: str,
         object_class: ClassEnum,
-    ) -> None:
-        """Update an attribute value for an object."""
-        raise NotImplementedError  # pragma: no cover
+    ) -> int | None:
+        """Update (or insert) an attribute value by object and attribute names.
+
+        Resolves the object_id and attribute_id via `get_object_id` and `get_attribute_id`.
+        Returns the attribute_data_id of the updated or newly inserted row.
+        """
+        # Resolve ids (will raise if not found)
+        object_id = self.get_object_id(object_class, name=object_name)
+        attribute_id = self.get_attribute_id(object_class, name=attribute_name)
+        return self._update_attribute(new_value, attribute_id, object_id)
 
     def update_category(self, category: str, new_name: str, /, *, class_name: ClassEnum) -> None:
         """Update a category name."""
