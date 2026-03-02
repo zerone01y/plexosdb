@@ -24,7 +24,7 @@ def test_delete_object_with_no_properties(db_base: PlexosDB, caplog):
 
     assert len(db.list_object_memberships(object_class, object_name)) == 1
 
-    db.delete_object(object_class, name=object_name)
+    db.delete_object(class_enum=object_class, name=object_name)
 
     assert not db.check_object_exists(object_class, name=object_name)
     assert object_name not in db.list_objects_by_class(object_class)
@@ -54,7 +54,7 @@ def test_delete_object_with_properties(db_base: PlexosDB, caplog):
         test_property_value,
     )
 
-    db.delete_object(object_class, name=object_name)
+    db.delete_object(class_enum=object_class, name=object_name)
     with pytest.raises(NotFoundError):
         _ = db.get_object_properties(object_class, object_name)
 

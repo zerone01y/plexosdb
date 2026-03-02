@@ -114,6 +114,100 @@ class PropertyRecord(TypedDict, total=False):
 class PlexosDB:
     """High-level API for PlexosDB schema manipulation."""
 
+    def to_excel(self, target_path: str | Path, /, *, tables: list[str] | None = None) -> None:
+        """Export selected tables or the entire database to Excel (each table is a sheet)."""
+        import pandas as pd
+        from pathlib import Path
+
+        out_path = Path(target_path)
+        # Define which logical tables to export and how to get their rows
+        table_funcs: dict[str, Callable[[], list[dict[str, Any]]]] = {
+            "Objects": lambda: self.get_objects_table(),
+            "Categories": lambda: self.get_categories_table(),
+            "Memberships": lambda: self.get_memberships_table(),
+            "CustomColumns": lambda: [],
+            "Attributes": lambda: self.get_attributes_table(),
+            "Properties": lambda: self.get_properties_table(),
+            "Reports": lambda: self.get_reports_table(),
+            "Config": lambda: self.get_config_table(),
+        }
+        default_tables = [
+            "Objects",
+            "Categories",
+            "Memberships",
+            "CustomColumns",
+            "Attributes",
+            "Properties",
+            "Reports",
+            "Config",
+        ]
+        export_tables = tables if tables is not None else default_tables
+
+        # Header fallbacks when there are no rows
+        headers_map: dict[str, list[str]] = {
+            "Objects": ["class_name", "GUID", "name", "category", "description"],
+            "Categories": ["class", "category", "rank"],
+            "Memberships": ["parent_class", "child_class", "collection", "parent_object", "child_object"],
+            "CustomColumns": ["class", "object", "column", "guid", "position", "value"],
+            "Attributes": ["name", "class", "attribute", "value", "attribute_enum_id", "base_class_id"],
+            "Properties": [
+                "parent_class",
+                "child_class",
+                "collection",
+                "parent_object",
+                "child_object",
+                "property",
+                "unit",
+                "band_id",
+                "value",
+                "date_from",
+                "date_to",
+                "pattern",
+                "action",
+                "expression",
+                "filename",
+                "scenario",
+                "memo",
+            ],
+            "Reports": [
+                "object",
+                "parent_class",
+                "child_class",
+                "collection",
+                "property",
+                "phase_id",
+                "report_period",
+                "report_summary",
+                "report_statistics",
+                "report_samples",
+                "write_flat_files",
+            ],
+            "Config": ["Name", "Value"],
+        }
+
+        with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+            for table_name in export_tables:
+                if table_name not in table_funcs:
+                    continue
+                try:
+                    rows = table_funcs[table_name]() or []
+                except Exception:
+                    rows = []
+                # Post-fetch filters requested by user
+                if table_name == "Objects":
+                    rows = [r for r in rows if str(r.get("class_name")) != str(ClassEnum.System)]
+                if table_name == "Categories":
+                    rows = [r for r in rows if r.get("category") != "-"]
+                # Determine headers
+                if rows:
+                    headers = list(rows[0].keys())
+                else:
+                    headers = headers_map.get(table_name, [])
+                # Build DataFrame
+                df = pd.DataFrame(rows, columns=headers)
+                df.to_excel(writer, sheet_name=table_name, index=False)
+        return None
+
     def __init__(
         self,
         fpath_or_conn: Path | str | sqlite3.Connection | None = None,
@@ -2246,14 +2340,23 @@ class PlexosDB:
 
     def delete_attribute(
         self,
-        attribute_name: str,
         /,
         *,
+        attribute_name: str,
         object_name: str,
         object_class: ClassEnum,
+        object_id: int,
+        attribute_id: int,
     ) -> None:
         """Delete an attribute from an object."""
-        raise NotImplementedError  # pragma: no cover
+        if object_id is None:
+            object_id = self.get_object_id(object_class, name=object_name)
+        if attribute_id is None:
+            attribute_id = self.get_attribute_id(object_class, name=attribute_name)
+        query = "DELETE FROM t_attribute_data WHERE attribute_id = ? and object_id = ?"
+        with self._db.transaction():
+            self._db.execute(query, (attribute_id, object_id))
+        return
 
     def delete_category(self, category: str, /, *, class_name: ClassEnum) -> None:
         """Delete a category from the database."""
@@ -2261,16 +2364,59 @@ class PlexosDB:
 
     def delete_membership(
         self,
-        parent_object_name: str,
-        child_object_name: str,
         /,
         *,
-        parent_class: ClassEnum,
-        child_class: ClassEnum,
-        collection: CollectionEnum,
+        parent_object_name: str | None = None,
+        child_object_name: str | None = None,
+        parent_class: ClassEnum | None = None,
+        child_class: ClassEnum | None = None,
+        collection: CollectionEnum | None = None,
+        parent_object_id: int | None = None,
+        child_object_id: int | None = None,
     ) -> None:
-        """Delete a membership between two objects."""
-        raise NotImplementedError  # pragma: no cover
+        """Delete a membership between two objects.
+
+        Removes the membership row from t_membership for the given parent/child/class/collection.
+        """
+        # Resolve membership_id
+        if parent_object_id is None:
+            if parent_class is None or parent_object_name is None:
+                raise ValueError(
+                    "Either parent_object_id or (parent_class and parent_object_name) must be provided"
+                )
+            parent_object_id = self.get_object_id(parent_class, parent_object_name)
+        if child_object_id is None:
+            if child_class is None or child_object_name is None:
+                raise ValueError(
+                    "Either child_object_id or (child_class and child_object_name) must be provided"
+                )
+            child_object_id = self.get_object_id(child_class, child_object_name)
+        if collection is None or parent_class is None or child_class is None:
+            raise ValueError(
+                "collection, parent_class and child_class must be provided to resolve collection_id"
+            )
+        collection_id = self.get_collection_id(collection, parent_class, child_class)
+        query = (
+            "SELECT membership_id FROM t_membership "
+            "WHERE parent_object_id = ? AND child_object_id = ? "
+            "AND collection_id = ?"
+        )
+        row = self._db.fetchone(query, (parent_object_id, child_object_id, collection_id))
+        if not row:
+            msg = (
+                "Membership not found: "
+                + f"{parent_object_name} ({parent_class}) "
+                + "-> "
+                + f"{child_object_name} ({child_class}) "
+                + "via "
+                + f"{collection}"
+            )
+            raise ValueError(msg)
+        membership_id = row[0]
+        delete_query = "DELETE FROM t_membership WHERE membership_id = ?"
+        with self._db.transaction():
+            self._db.execute(delete_query, (membership_id,))
+        return
 
     def delete_metadata(
         self,
@@ -2282,12 +2428,17 @@ class PlexosDB:
         """Delete metadata from an entity."""
         raise NotImplementedError  # pragma: no cover
 
-    def delete_object(self, class_enum: ClassEnum, /, *, name: str) -> None:
+    def delete_object(
+        self, /, *, name: str | None = None, class_enum: ClassEnum | None = None, object_id: int | None = None
+    ) -> None:
         """Delete an object and its memberships from the database.
 
         Default behaviour is to remove all the references of the object including memberships and data.
         """
-        object_id = self.get_object_id(class_enum, name=name)
+        if object_id is None:
+            if name is None or class_enum is None:
+                raise ValueError("Either object_id or (class_enum and name) must be provided")
+            object_id = self.get_object_id(class_enum, name=name)
         delete_query = "DELETE FROM t_object WHERE object_id = ?"
 
         # Handle delete in transaction in case an error happens.
@@ -2446,10 +2597,16 @@ class PlexosDB:
         data_id: int,
         /,
         *,
-        class_id: int,
+        class_id: int | None = None,
     ) -> None:
         """Delete text data from a property data record."""
-        raise NotImplementedError  # pragma: no cover
+        if class_id is not None:
+            delete_query = "DELETE FROM t_text WHERE data_id = ? AND class_id = ?"
+        else:
+            delete_query = "DELETE FROM t_text WHERE data_id = ?"
+        with self._db.transaction():
+            self._db.execute(delete_query, (data_id, class_id))
+        return
 
     def get_attribute(
         self,
@@ -3233,9 +3390,141 @@ class PlexosDB:
         assert result
         return [r[0] for r in result]
 
+    def deep_delete_object(  # noqa: C901 - complexity justified
+        self,
+        *,
+        object_id: int | None = None,
+        class_enum: ClassEnum | None = None,
+        object_name: str | None = None,
+        dry_run: bool = True,
+        tag_only: bool = False,
+    ) -> list[str]:
+        """
+            Deep-delete an object and all related rows using helper functions.
+
+        This method deletes all memberships for the object and removes related
+        attribute data and properties. The affected entities include:
+        memberships, attribute data, memos, object metadata, reports and tags.
+
+        Note: when `tag_only` is True and the object is a scenario, only the
+        scenario tag is removed and associated data are preserved.
+        """
+        if object_id is None:
+            if object_name is None or class_enum is None:
+                raise ValueError("Either object_id or (class_enum and object_name) must be provided")
+            object_id = self.get_object_id(class_enum, object_name)
+        if not object_name:
+            result = self._db.fetchall(
+                "SELECT o.name, c.name FROM t_object o left join t_class c "
+                "ON c.class_id = o.class_id WHERE o.object_id = ?",
+                (object_id,),
+            )
+            object_name = result[0][0] if result else None
+            try:
+                class_enum = ClassEnum(result[0][1].replace(" ", "")) if result else None
+            except ValueError:
+                print(f"class enum not defined: {class_enum}")
+                class_enum = None
+        msgs: list[str] = []
+
+        # 1. Find memberships for the object
+        memberships = self._db.fetchall(
+            "SELECT membership_id, parent_object_id, child_object_id, collection_id "
+            "FROM t_membership WHERE parent_object_id = ? OR child_object_id = ?",
+            (object_id, object_id),
+        )
+        msgs.append(f"Found {len(memberships)} membership(s) referencing object_id={object_id}")
+
+        for membership_id, *_ in memberships:
+            if dry_run:
+                msgs.append(f"Would delete membership_id: {membership_id}")
+            else:
+                try:
+                    with self._db.transaction():
+                        self._db.execute("DELETE FROM t_membership WHERE membership_id = ?", (membership_id,))
+                    msgs.append(f"Deleted membership_id: {membership_id}")
+                except Exception as e:
+                    msgs.append(f"Failed to delete membership_id {membership_id}: {e}")
+
+        # For each membership, find and remove all t_data rows (and cascade)
+        data_ids = set()
+        for membership_id, *_ in memberships:
+            rows = self._db.fetchall("SELECT data_id FROM t_data WHERE membership_id = ?", (membership_id,))
+            for r in rows:
+                data_ids.add(r[0])
+        msgs.append(f"Found {len(data_ids)} data_id(s) associated with memberships.")
+
+        # For each data_id, remove associated tags, text, band, etc.
+        for data_id in data_ids:
+            if dry_run:
+                msgs.append(f"Would delete: data_id={data_id}")
+            else:
+                try:
+                    self.deep_delete_property(data_id=data_id)
+                    msgs.append(f"Deleted tag: data_id={data_id}")
+                except Exception as e:
+                    msgs.append(f"Failed to delete tag: {e}")
+
+        # Tag/data deletion logic
+        if not tag_only:
+            tag_rows = self._db.fetchall("SELECT data_id FROM t_tag WHERE object_id = ?", (object_id,))
+            msgs.append(f"Found {len(tag_rows)} tagged data for object_id={object_id}")
+            for (data_id,) in tag_rows:
+                if dry_run:
+                    msgs.append(f"Would delete tag: data_id={data_id}")
+                else:
+                    try:
+                        self.deep_delete_property(data_id=data_id)
+                    except Exception as e:
+                        msgs.append(f"Failed to delete tagged data: {e}")
+
+        # Delete other associated data, but first report how many rows will be deleted
+        for table in ["t_attribute_data", "t_memo_object", "t_object_meta", "t_report", "t_tag"]:
+            count_query = f"SELECT COUNT(*) FROM {table} WHERE object_id = ?"
+            res = self._db.fetchone(count_query, (object_id,))
+            row_count = int(res[0]) if res and res[0] is not None else 0
+            if row_count > 0:
+                msgs.append(f"{row_count} row(s) would be deleted from {table} where object_id={object_id}")
+                if not dry_run:
+                    try:
+                        with self._db.transaction():
+                            self._db.execute(f"DELETE FROM {table} WHERE object_id = ?", (object_id,))
+                        msgs.append(f"Deleted from {table} where object_id={object_id}")
+                    except Exception as e:
+                        msgs.append(f"Failed to delete from {table}: {e}")
+
+        # Finally, report and delete the object itself
+        res = self._db.fetchone("SELECT COUNT(*) FROM t_object WHERE object_id = ?", (object_id,))
+        obj_count = int(res[0]) if res and res[0] is not None else 0
+        msgs.append(f"{obj_count} object row(s) would be deleted for object_id={object_id}")
+        if dry_run:
+            msgs.append(f"Would delete object: {object_name} ({class_enum})")
+        else:
+            try:
+                self.delete_object(class_enum=class_enum, object_id=object_id)
+                msgs.append(f"Deleted object: {object_name} ({class_enum})")
+            except Exception as e:
+                msgs.append(f"Failed to delete object: {e}")
+        for msg in msgs:
+            print(msg)
+        return msgs
+
     def get_plexos_version(self) -> tuple[int, ...] | None:
         """Return the version information of the PLEXOS model."""
         return self.version
+
+    def deep_delete_property(self, data_id: int) -> None:
+        """Recursively delete a property and all its associated data."""
+        with self._db.transaction():
+            self._db.execute("DELETE FROM t_data WHERE data_id = ?", (data_id,))
+            self._db.execute("DELETE FROM t_tag WHERE data_id = ?", (data_id,))
+            self._db.execute("DELETE FROM t_text WHERE data_id = ?", (data_id,))
+            self._db.execute("DELETE FROM t_band WHERE data_id = ?", (data_id,))
+            self._db.execute("DELETE FROM t_data_meta WHERE data_id = ?", (data_id,))
+            self._db.execute("DELETE FROM t_date_from WHERE data_id = ?", (data_id,))
+            self._db.execute("DELETE FROM t_date_to WHERE data_id = ?", (data_id,))
+            self._db.execute("DELETE FROM t_memo_data WHERE data_id = ?", (data_id,))
+        return
 
     def get_property_id(
         self,
