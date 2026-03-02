@@ -1,11 +1,11 @@
 WITH text_agg AS (
 SELECT
 	tt.data_id,
-	MAX(CASE 
+	MAX(CASE
                 WHEN tc.name = 'Data File'
                 THEN tt.value
             END) AS datafile_text,
-	MAX(CASE 
+	MAX(CASE
                 WHEN tc.name = 'Timeslice'
                 THEN tt.value
             END) AS timeslice_text,
@@ -17,23 +17,23 @@ LEFT JOIN t_class tc ON
 GROUP BY
 	tt.data_id
     )
-    ,    
+    ,
 tag_agg AS (
 SELECT
 	tg.data_id,
-	MAX(CASE 
+	MAX(CASE
                 WHEN tc.name = 'Data File'
                 THEN '{Object}' || o.name
             END) AS datafile_tag,
-	MAX(CASE 
+	MAX(CASE
                 WHEN tc.name = 'Timeslice'
                 THEN '{Object}' || o.name
             END) AS timeslice_tag,
-	MAX(CASE 
+	MAX(CASE
                 WHEN tc.name = 'Scenario'
                 THEN '{Object}' || o.name
             END) AS scenario_tag,
-	MAX(CASE 
+	MAX(CASE
                 WHEN tc.name = 'Variable'
                 THEN '{Object}' || o.name
             END) AS variable_tag,
@@ -45,11 +45,11 @@ LEFT JOIN t_object o ON
 LEFT JOIN t_class tc ON
 	o.class_id = tc.class_id
 LEFT JOIN t_action ta on
-	tg.action_id = ta.action_id 
+	tg.action_id = ta.action_id
 GROUP BY
 	tg.data_id
 ORDER BY
-	tc.class_id  
+	tc.class_id
 	)
     SELECT
 	parent_class.name AS parent_class,
@@ -105,6 +105,7 @@ LEFT JOIN tag_agg AS tag_agg ON
 --- cte: text ---
 LEFT JOIN text_agg AS text_agg ON
 	text_agg.data_id = d.data_id
+${where_clause}
 ORDER BY
 	parent_class,
 	collection,

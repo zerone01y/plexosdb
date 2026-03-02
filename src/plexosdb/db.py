@@ -8,7 +8,8 @@ from importlib.resources import files
 from pathlib import Path
 from string import Template
 import csv
-from typing import Any, Literal, TypedDict, cast, Callable
+from typing import Any, Literal, TypedDict, cast
+from collections.abc import Callable
 from collections.abc import Sequence
 import warnings
 
@@ -47,10 +48,14 @@ SQLITE_BACKEND_KWARGS = {"in_memory"}
 CHECK_QUERY = "SELECT 1 FROM ${schema} ${where_clause}"
 PLEXOS_DEFAULT_SCHEMA = fpath = files("plexosdb").joinpath("schema.sql").read_text(encoding="utf-8-sig")
 PROPERTY_QUERY = files("plexosdb.queries").joinpath("object_properties.sql").read_text(encoding="utf-8-sig")
-PROPERTY_QUERY_ALT = files("plexosdb.queries").joinpath("table_properties.sql").read_text(encoding="utf-8-sig")
+PROPERTY_QUERY_ALT = (
+    files("plexosdb.queries").joinpath("table_properties.sql").read_text(encoding="utf-8-sig")
+)
 OBJECTS_QUERY = files("plexosdb.queries").joinpath("table_objects.sql").read_text(encoding="utf-8-sig")
 CATEGORIES_QUERY = files("plexosdb.queries").joinpath("table_categories.sql").read_text(encoding="utf-8-sig")
-MEMBERSHIPS_QUERY = files("plexosdb.queries").joinpath("table_memberships.sql").read_text(encoding="utf-8-sig")
+MEMBERSHIPS_QUERY = (
+    files("plexosdb.queries").joinpath("table_memberships.sql").read_text(encoding="utf-8-sig")
+)
 ATTRIBUTES_QUERY = files("plexosdb.queries").joinpath("table_attributes.sql").read_text(encoding="utf-8-sig")
 REPORTS_QUERY = files("plexosdb.queries").joinpath("table_reports.sql").read_text(encoding="utf-8-sig")
 CONFIG_QUERY = files("plexosdb.queries").joinpath("table_config.sql").read_text(encoding="utf-8-sig")
@@ -150,10 +155,7 @@ class PlexosDB:
         return tuple(map(int, result[0].split(".")))
 
     def get_objects_table(
-        self,
-        /,
-        *,
-        class_enum: ClassEnum | None = None,
+        self, /, *, class_enum: ClassEnum | None = None, where_clause: str | None = None
     ) -> list[dict[str, Any]]:
         """Return objects as a table-like list of dicts.
 
@@ -178,12 +180,15 @@ class PlexosDB:
         [{'class_name': 'Generator', 'GUID': '...', 'name': 'GenA', 'category': '-', 'description': 'Unit A'}]
         """
         params: dict[str, Any] = {}
-        where_clause = ""
+        _where_clause = ""
         if class_enum is not None:
-            where_clause = "WHERE c.name = :class_name"
+            _where_clause = "WHERE c.name = :class_name"
             params["class_name"] = class_enum
-
-        query = Template(OBJECTS_QUERY).safe_substitute(where_clause=where_clause)
+        if where_clause:
+            _where_clause = " WHERE " + " AND ".join(
+                [c.lstrip("WHERE") for c in [_where_clause, where_clause] if c]
+            )
+        query = Template(OBJECTS_QUERY).safe_substitute(where_clause=_where_clause)
         result = self._db.fetchall_dict(query, params if params else None)
         return result or []
 
@@ -211,41 +216,46 @@ class PlexosDB:
         result = self._db.fetchall_dict(query)
         return result or []
 
-    def get_attributes_table(self) -> list[dict[str, Any]]:
+    def get_attributes_table(self, /, *, where_clause: str = "") -> list[dict[str, Any]]:
         """Return attributes table rows.
 
         Columns: name, class, attribute, value, attribute_enum_id, base_class_id
         Note: attribute_enum_id and base_class_id are read from t_attribute.enum_id and t_class.inherits_from
         """
-        params: dict[str, Any] = {}
-        where_clause = ""
         query = Template(ATTRIBUTES_QUERY).safe_substitute(where_clause=where_clause)
         result = self._db.fetchall_dict(query, None)
         return result or []
 
-    def get_properties_table(self, /, *, child_object: str | None = None) -> list[dict[str, Any]]:
+    def get_properties_table(
+        self, /, *, child_object: str | None = None, where_clause: str | None = None
+    ) -> list[dict[str, Any]]:
         """Return properties as rows matching requested columns.
 
-        Columns: parent_class, child_class, collection, parent_object, child_object, property, unit, band_id, value, date_from, date_to, pattern, action, expression, filename, scenario, memo
+        Columns: parent_class, child_class, collection, parent_object, child_object, property, unit, band_id,
+                 value, date_from, date_to, pattern, action, expression, filename, scenario, memo
 
         Parameters
         ----------
         child_object : str | None
             If provided, filter properties to only those for the given child object name.
         """
-        where_clause = ""
+        _where_clause = ""
         params: dict[str, Any] = {}
         if child_object:
-            where_clause = "WHERE child_obj.name = :child_object"
+            _where_clause = "WHERE child_obj.name = :child_object"
             params["child_object"] = child_object
-
+        if where_clause:
+            _where_clause = "WHERE " + " AND ".join(
+                [c.lstrip("WHERE") for c in [_where_clause, where_clause] if c]
+            )
         # Use the external property query loaded at module import and substitute a where clause
-        query = Template(PROPERTY_QUERY_ALT).safe_substitute(where_clause=where_clause)
+        query = Template(PROPERTY_QUERY_ALT).safe_substitute(where_clause=_where_clause)
         result = self._db.fetchall_dict(query, params if params else None)
         return result or []
 
     def get_reports_table(self, /, *, object_name: str | None = None) -> list[dict[str, Any]]:
-        """Return reports table rows with object, parent_class, child_class, collection, property, phase_id and flags.
+        """Return reports table rows with object, parent_class, child_class, collection, property, phase_id
+        and flags.
 
         Parameters
         ----------
@@ -4277,7 +4287,6 @@ class PlexosDB:
 
     def to_csv(self, target_path: str | Path, /, *, tables: list[str] | None = None) -> None:
         """Export selected tables or the entire database to CSV files."""
-        
         out_base = Path(target_path)
         out_dir = out_base
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -4464,10 +4473,10 @@ class PlexosDB:
         return True
 
     def _update_attribute(
-            self,
-            new_value: str | float | int,
-            attribute_id: int,
-            object_id: int,
+        self,
+        new_value: str | float | int,
+        attribute_id: int,
+        object_id: int,
     ) -> int | None:
         """Low-level attribute upsert: SELECT -> UPDATE or INSERT.
 
@@ -4488,7 +4497,7 @@ class PlexosDB:
         insert_q = "INSERT INTO t_attribute_data (object_id, attribute_id, value) VALUES (?, ?, ?)"
         self._db.execute(insert_q, (object_id, attribute_id, new_value))
         return self._db.last_insert_rowid()
-    
+
     def update_attribute(
         self,
         new_value: str | float | int,
