@@ -3032,6 +3032,7 @@ class PlexosDB:
         *object_names: Iterable[str] | str,
         object_class: ClassEnum,
         collection: CollectionEnum | None = None,
+        parent_class: ClassEnum | None = ClassEnum.System,
     ) -> list[dict[str, Any]]:
         """Retrieve memberships for the requested object names.
 
@@ -3079,9 +3080,15 @@ class PlexosDB:
 
         extra = ""
         extra_params: list[Any] = []
+        extra_conditions: list[str] = []
+        if parent_class:
+            extra_conditions.append("parent_class.name = ?")
+            extra_params.append(parent_class.value)
         if collection:
-            extra = " AND parent_class.name = ? AND collections.name = ?"
-            extra_params = [ClassEnum.System.value, collection.value]
+            extra_conditions.append("collections.name = ?")
+            extra_params.append(collection.value)
+        if extra_conditions:
+            extra = " AND " + " AND ".join(extra_conditions)
 
         # Specify bound parameter limit
         CHUNK = 900  # noqa: N806
@@ -4710,12 +4717,12 @@ class PlexosDB:
         """
         # Check if an attribute_data row already exists
         row = self._db.fetchone(
-            "SELECT attribute_data_id FROM t_attribute_data WHERE object_id = ? AND attribute_id = ?",
+            "SELECT attribute_id FROM t_attribute_data WHERE object_id = ? AND attribute_id = ?",
             (object_id, attribute_id),
         )
         if row:
             attribute_data_id = int(row[0])
-            update_q = "UPDATE t_attribute_data SET value = ? WHERE attribute_data_id = ?"
+            update_q = "UPDATE t_attribute_data SET value = ? WHERE attribute_id = ?"
             self._db.execute(update_q, (new_value, attribute_data_id))
             return attribute_data_id
 
