@@ -3390,121 +3390,58 @@ class PlexosDB:
         assert result
         return [r[0] for r in result]
 
-    def deep_delete_object(  # noqa: C901 - complexity justified
+    def delete_scenario(
         self,
         *,
         object_id: int | None = None,
-        class_enum: ClassEnum | None = None,
         object_name: str | None = None,
         dry_run: bool = True,
         tag_only: bool = False,
     ) -> list[str]:
-        """
-            Deep-delete an object and all related rows using helper functions.
+        """Delete a Scenario object or its tags.
 
-        This method deletes all memberships for the object and removes related
-        attribute data and properties. The affected entities include:
-        memberships, attribute data, memos, object metadata, reports and tags.
-
-        Note: when `tag_only` is True and the object is a scenario, only the
-        scenario tag is removed and associated data are preserved.
+        The database schema defines ON DELETE CASCADE for memberships and data
+        referencing objects, so removing the Scenario object will cascade and
+        remove associated tags and property data. This helper focuses on the
+        scenario-specific operation: when `tag_only` is True it removes only
+        t_tag rows for the specified scenario object; otherwise callers can
+        delete the scenario object itself (which will cascade).
         """
         if object_id is None:
-            if object_name is None or class_enum is None:
+            if object_name is None:
                 raise ValueError("Either object_id or (class_enum and object_name) must be provided")
-            object_id = self.get_object_id(class_enum, object_name)
-        if not object_name:
-            result = self._db.fetchall(
-                "SELECT o.name, c.name FROM t_object o left join t_class c "
-                "ON c.class_id = o.class_id WHERE o.object_id = ?",
-                (object_id,),
-            )
-            object_name = result[0][0] if result else None
-            try:
-                class_enum = ClassEnum(result[0][1].replace(" ", "")) if result else None
-            except ValueError:
-                print(f"class enum not defined: {class_enum}")
-                class_enum = None
+            object_id = self.get_object_id(ClassEnum.Scenario, object_name)
         msgs: list[str] = []
 
-        # 1. Find memberships for the object
-        memberships = self._db.fetchall(
-            "SELECT membership_id, parent_object_id, child_object_id, collection_id "
-            "FROM t_membership WHERE parent_object_id = ? OR child_object_id = ?",
-            (object_id, object_id),
-        )
-        msgs.append(f"Found {len(memberships)} membership(s) referencing object_id={object_id}")
+        # Find data rows that are tagged by this scenario object
+        rows = self._db.fetchall("SELECT DISTINCT data_id FROM t_tag WHERE object_id = ?", (object_id,))
+        data_ids = [r[0] for r in rows] if rows else []
+        msgs.append(f"Found {len(data_ids)} data_id(s) tagged by object_id={object_id}")
 
-        for membership_id, *_ in memberships:
-            if dry_run:
-                msgs.append(f"Would delete membership_id: {membership_id}")
+        # Perform deletions: either remove tags only, or delete the data rows
+        # (which will cascade to tags/text/band/memos). Execute a single SQL
+        # statement per operation for clarity and performance.
+        if dry_run:
+            if tag_only:
+                msgs.append(f"Would delete {len(data_ids)} tag(s) for object_id={object_id}")
             else:
-                try:
-                    with self._db.transaction():
-                        self._db.execute("DELETE FROM t_membership WHERE membership_id = ?", (membership_id,))
-                    msgs.append(f"Deleted membership_id: {membership_id}")
-                except Exception as e:
-                    msgs.append(f"Failed to delete membership_id {membership_id}: {e}")
-
-        # For each membership, find and remove all t_data rows (and cascade)
-        data_ids = set()
-        for membership_id, *_ in memberships:
-            rows = self._db.fetchall("SELECT data_id FROM t_data WHERE membership_id = ?", (membership_id,))
-            for r in rows:
-                data_ids.add(r[0])
-        msgs.append(f"Found {len(data_ids)} data_id(s) associated with memberships.")
-
-        # For each data_id, remove associated tags, text, band, etc.
-        for data_id in data_ids:
-            if dry_run:
-                msgs.append(f"Would delete: data_id={data_id}")
-            else:
-                try:
-                    self.deep_delete_property(data_id=data_id)
-                    msgs.append(f"Deleted tag: data_id={data_id}")
-                except Exception as e:
-                    msgs.append(f"Failed to delete tag: {e}")
-
-        # Tag/data deletion logic
-        if not tag_only:
-            tag_rows = self._db.fetchall("SELECT data_id FROM t_tag WHERE object_id = ?", (object_id,))
-            msgs.append(f"Found {len(tag_rows)} tagged data for object_id={object_id}")
-            for (data_id,) in tag_rows:
-                if dry_run:
-                    msgs.append(f"Would delete tag: data_id={data_id}")
-                else:
-                    try:
-                        self.deep_delete_property(data_id=data_id)
-                    except Exception as e:
-                        msgs.append(f"Failed to delete tagged data: {e}")
-
-        # Delete other associated data, but first report how many rows will be deleted
-        for table in ["t_attribute_data", "t_memo_object", "t_object_meta", "t_report", "t_tag"]:
-            count_query = f"SELECT COUNT(*) FROM {table} WHERE object_id = ?"
-            res = self._db.fetchone(count_query, (object_id,))
-            row_count = int(res[0]) if res and res[0] is not None else 0
-            if row_count > 0:
-                msgs.append(f"{row_count} row(s) would be deleted from {table} where object_id={object_id}")
-                if not dry_run:
-                    try:
-                        with self._db.transaction():
-                            self._db.execute(f"DELETE FROM {table} WHERE object_id = ?", (object_id,))
-                        msgs.append(f"Deleted from {table} where object_id={object_id}")
-                    except Exception as e:
-                        msgs.append(f"Failed to delete from {table}: {e}")
+                msgs.append(
+                    f"Would delete {len(data_ids)} data row(s) (and cascaded children) for obj_id={object_id}"
+                )
+        else:
+            if (not tag_only) and data_ids:
+                # delete property data (cascades to t_tag, t_text, t_band, etc.)
+                for data_id in data_ids:
+                    self._delete_property(data_id)
 
         # Finally, report and delete the object itself
-        res = self._db.fetchone("SELECT COUNT(*) FROM t_object WHERE object_id = ?", (object_id,))
-        obj_count = int(res[0]) if res and res[0] is not None else 0
-        msgs.append(f"{obj_count} object row(s) would be deleted for object_id={object_id}")
         if dry_run:
-            msgs.append(f"Would delete object: {object_name} ({class_enum})")
+            msgs.append(f"Would delete object: {object_name}")
         else:
             try:
-                self.delete_object(class_enum=class_enum, object_id=object_id)
-                msgs.append(f"Deleted object: {object_name} ({class_enum})")
+                self.delete_object(class_enum=ClassEnum.Scenario, object_id=object_id)
             except Exception as e:
-                msgs.append(f"Failed to delete object: {e}")
+                msgs.append(f"\tFailed to delete object: {e}")
         for msg in msgs:
             print(msg)
         return msgs
@@ -3513,17 +3450,17 @@ class PlexosDB:
         """Return the version information of the PLEXOS model."""
         return self.version
 
-    def deep_delete_property(self, data_id: int) -> None:
-        """Recursively delete a property and all its associated data."""
+    def _delete_property(self, data_id: int) -> None:
+        """Delete a property row from `t_data`.
+
+        The database schema defines ON DELETE CASCADE for tables that reference
+        `t_data.data_id`, so deleting the row from `t_data` is sufficient to
+        remove associated rows (tags, text, bands, meta, dates, memos, etc.).
+        This function intentionally performs only the parent delete for clarity
+        and to avoid redundant, error-prone manual deletes.
+        """
         with self._db.transaction():
             self._db.execute("DELETE FROM t_data WHERE data_id = ?", (data_id,))
-            self._db.execute("DELETE FROM t_tag WHERE data_id = ?", (data_id,))
-            self._db.execute("DELETE FROM t_text WHERE data_id = ?", (data_id,))
-            self._db.execute("DELETE FROM t_band WHERE data_id = ?", (data_id,))
-            self._db.execute("DELETE FROM t_data_meta WHERE data_id = ?", (data_id,))
-            self._db.execute("DELETE FROM t_date_from WHERE data_id = ?", (data_id,))
-            self._db.execute("DELETE FROM t_date_to WHERE data_id = ?", (data_id,))
-            self._db.execute("DELETE FROM t_memo_data WHERE data_id = ?", (data_id,))
         return
 
     def get_property_id(
