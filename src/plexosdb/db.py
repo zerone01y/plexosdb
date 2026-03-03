@@ -2998,6 +2998,7 @@ class PlexosDB:
         object_class: ClassEnum,
         category: str | None = None,
         collection: CollectionEnum | None = None,
+        parent_class: ClassEnum | None = ClassEnum.System,
     ) -> list[dict[str, Any]]:
         """Retrieve system memberships for the given object(s).
 
@@ -3053,6 +3054,8 @@ class PlexosDB:
             conditions.append(
                 f"(child_object.object_id in {object_ids} OR parent_object.object_id in {object_ids})"
             )
+        if parent_class:
+            conditions.append(f"parent_class.name = '{parent_class.value}'")
         if collection:
             conditions.append(f"collections.name = '{collection.value}'")
         if conditions:
@@ -4671,12 +4674,12 @@ class PlexosDB:
         """
         # Check if an attribute_data row already exists
         row = self._db.fetchone(
-            "SELECT attribute_data_id FROM t_attribute_data WHERE object_id = ? AND attribute_id = ?",
+            "SELECT attribute_id FROM t_attribute_data WHERE object_id = ? AND attribute_id = ?",
             (object_id, attribute_id),
         )
         if row:
             attribute_data_id = int(row[0])
-            update_q = "UPDATE t_attribute_data SET value = ? WHERE attribute_data_id = ?"
+            update_q = "UPDATE t_attribute_data SET value = ? WHERE attribute_id = ?"
             self._db.execute(update_q, (new_value, attribute_data_id))
             return attribute_data_id
 
