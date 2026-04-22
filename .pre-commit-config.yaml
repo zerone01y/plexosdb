@@ -60,7 +60,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest (quick)
-        entry: uv run python -m pytest -q -m "not slow" --maxfail=1 --disable-pytest-warnings --no-cov
+        entry: uv run python -m pytest -q -m "not slow" --maxfail=1 --disable-pytest-warnings
         language: system
         types: [python]
         pass_filenames: false

@@ -2891,10 +2891,12 @@ class PlexosDB:
         """Delete text data from a property data record."""
         if class_id is not None:
             delete_query = "DELETE FROM t_text WHERE data_id = ? AND class_id = ?"
+            with self._db.transaction():
+                self._db.execute(delete_query, (data_id, class_id))
         else:
             delete_query = "DELETE FROM t_text WHERE data_id = ?"
-        with self._db.transaction():
-            self._db.execute(delete_query, (data_id, class_id))
+            with self._db.transaction():
+                self._db.execute(delete_query, (data_id,))
         return
 
     def get_attribute(

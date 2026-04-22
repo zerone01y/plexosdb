@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 
 from plexosdb import ClassEnum
@@ -400,3 +402,163 @@ def test_update_property_with_datafile_object_replaces_existing_datafile_tag(db_
 
     assert not db_with_topology.check_tag_exists(data_id, old_datafile_id)
     assert db_with_topology.check_tag_exists(data_id, new_datafile_id)
+
+
+def test_update_property_with_nonexistent_object_raises_not_found(db_with_topology):
+    with pytest.raises(Exception, match="does not exist"):
+        db_with_topology.update_property(
+            ClassEnum.Generator,
+            object_name="missing-generator",
+            property_name="Max Capacity",
+            value=1.0,
+        )
+
+
+def test_update_property_with_ambiguous_rows_raises_runtime_error(db_with_topology):
+    db_with_topology.add_property(ClassEnum.Generator, "thermal-01", "Heat Rate", 10.5, band=1)
+    db_with_topology.add_property(ClassEnum.Generator, "thermal-01", "Heat Rate", 11.5, band=2)
+
+    with pytest.raises(RuntimeError, match="Ambiguous property"):
+        db_with_topology.update_property(
+            ClassEnum.Generator,
+            object_name="thermal-01",
+            property_name="Heat Rate",
+            value=12.5,
+            scenario="",
+        )
+
+
+def test_update_property_updates_existing_row_with_dates(db_with_topology):
+    data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Fuel Price",
+        6.5,
+        band=1,
+        date_from=datetime(2024, 1, 1),
+        date_to=datetime(2024, 12, 31),
+    )
+
+    updated_data_id = db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Fuel Price",
+        value=7.5,
+        scenario=None,
+        band=1,
+        date_from=datetime(2024, 1, 1),
+        date_to=datetime(2024, 12, 31),
+    )
+
+    assert updated_data_id == data_id
+    assert db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (data_id,))[0][0] == 7.5
+
+
+def test_update_property_updates_existing_row_with_timeslice(db_with_topology):
+    data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Fuel Price",
+        6.5,
+        band=1,
+        timeslice="Peak",
+    )
+
+    updated_data_id = db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Fuel Price",
+        value=7.0,
+        scenario=None,
+        band=1,
+        timeslice="Peak",
+    )
+
+    assert updated_data_id == data_id
+    assert db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (data_id,))[0][0] == 7.0
+
+
+def test_update_property_with_datafile_object_id_replaces_existing_tag(db_with_topology):
+    old_datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "ExistingDatafile")
+    new_datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "ReplacementDatafile")
+
+    data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Fuel Price",
+        5.5,
+        band=1,
+        datafile_object="ExistingDatafile",
+    )
+
+    db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Fuel Price",
+        value=5.75,
+        scenario=None,
+        band=1,
+        datafile_object=new_datafile_id,
+    )
+
+    assert not db_with_topology.check_tag_exists(data_id, old_datafile_id)
+    assert db_with_topology.check_tag_exists(data_id, new_datafile_id)
+
+
+def test_get_object_data_ids_returns_empty_when_object_has_no_data(db_with_topology):
+    assert db_with_topology.get_object_data_ids(ClassEnum.Generator, "solar-01") == []
+
+
+def test_get_object_data_ids_raises_for_invalid_category(db_with_topology):
+    with pytest.raises(KeyError):
+        db_with_topology.get_object_data_ids(
+            ClassEnum.Generator,
+            "thermal-01",
+            category="missing-category",
+        )
+
+
+def test_get_object_data_ids_raises_for_invalid_property(db_with_topology):
+    with pytest.raises(Exception, match="Invalid property"):
+        db_with_topology.get_object_data_ids(
+            ClassEnum.Generator,
+            "thermal-01",
+            property_names="NotAProperty",
+        )
+
+
+def test_validate_and_filter_objects_returns_only_existing_names(db_with_topology):
+    result = db_with_topology._validate_and_filter_objects(
+        ["thermal-01", "missing-generator", "solar-01"],
+        ClassEnum.Generator,
+    )
+
+    assert sorted(result) == ["solar-01", "thermal-01"]
+
+
+def test_validate_and_filter_objects_raises_when_none_exist(db_with_topology):
+    with pytest.raises(Exception, match="None of the objects"):
+        db_with_topology._validate_and_filter_objects(["missing-1", "missing-2"], ClassEnum.Generator)
+
+
+def test_validate_properties_returns_normalized_names(db_with_topology):
+    from plexosdb.enums import get_default_collection
+
+    result = db_with_topology._validate_properties(
+        ["Max Capacity", "Fuel Price"],
+        get_default_collection(ClassEnum.Generator),
+        ClassEnum.Generator,
+    )
+
+    assert sorted(result) == ["Fuel Price", "Max Capacity"]
+
+
+def test_validate_properties_raises_for_invalid_property(db_with_topology):
+    from plexosdb.enums import get_default_collection
+
+    with pytest.raises(Exception, match="Invalid property"):
+        db_with_topology._validate_properties(
+            ["NotAProperty"],
+            get_default_collection(ClassEnum.Generator),
+            ClassEnum.Generator,
+        )

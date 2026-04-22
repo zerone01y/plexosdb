@@ -263,3 +263,36 @@ def test_add_datafile_tag_replace_existing_only_replaces_datafile_tags(db_with_t
     assert not db_with_topology.check_tag_exists(property_data_id, old_datafile_id)
     assert db_with_topology.check_tag_exists(property_data_id, new_datafile_id)
     assert db_with_topology.check_tag_exists(property_data_id, scenario_id)
+
+
+def test_add_datafile_tag_with_invalid_datafile_id_raises_value_error(db_with_topology: PlexosDB) -> None:
+    from plexosdb import ClassEnum
+
+    property_data_id = db_with_topology.add_property(
+        ClassEnum.Generator, "thermal-01", "Max Capacity", 100.0, band=1
+    )
+
+    with pytest.raises(ValueError, match="No DataFile found with object_id"):
+        db_with_topology.add_datafile_tag(property_data_id, datafile_id=999999)
+
+
+def test_add_datafile_tag_with_missing_filename_lookup_raises_value_error(db_with_topology: PlexosDB) -> None:
+    from plexosdb import ClassEnum
+
+    property_data_id = db_with_topology.add_property(
+        ClassEnum.Generator, "thermal-01", "Max Capacity", 100.0, band=1
+    )
+
+    with pytest.raises(ValueError, match="No DataFile found with Filename"):
+        db_with_topology.add_datafile_tag(property_data_id, "missing/file.csv")
+
+
+def test_add_datafile_tag_requires_selector(db_with_topology: PlexosDB) -> None:
+    from plexosdb import ClassEnum
+
+    property_data_id = db_with_topology.add_property(
+        ClassEnum.Generator, "thermal-01", "Max Capacity", 100.0, band=1
+    )
+
+    with pytest.raises(ValueError, match="Pass one of datafile_id, datafile_name, or file_path"):
+        db_with_topology.add_datafile_tag(property_data_id)

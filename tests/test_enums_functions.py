@@ -387,6 +387,14 @@ def test_parse_str_enum_invalid_value_raises():
         _parse_str_enum(ClassEnum, "NotAClass")
 
 
+def test_parse_str_enum_non_string_non_enum_raises():
+    """Test _parse_str_enum raises ValueError for non-string, non-enum value."""
+    from plexosdb.enums import _parse_str_enum, ClassEnum
+
+    with pytest.raises(ValueError):
+        _parse_str_enum(ClassEnum, 42)  # type: ignore[arg-type]
+
+
 def test_parse_class_enum_and_collection_enum():
     """Test parse_class_enum and parse_collection_enum utility functions."""
     from plexosdb.enums import parse_class_enum, parse_collection_enum, ClassEnum, CollectionEnum

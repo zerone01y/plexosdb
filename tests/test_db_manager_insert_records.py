@@ -110,3 +110,8 @@ def test_insert_records_returns_true_and_preserves_original(db_with_users_table:
 
     assert result is True
     assert record == original
+
+
+def test_insert_records_list_with_empty_dict_raises_error(db_with_users_table: SQLiteManager) -> None:
+    with pytest.raises(ValueError, match="Records cannot be empty"):
+        db_with_users_table.insert_records("users", [{}])

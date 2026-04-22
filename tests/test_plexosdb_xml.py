@@ -96,14 +96,10 @@ def test_iter_with_elements(xml_handler):
     assert isinstance(elements, list)
 
 
-def test_cache_iter_with_label_filter(xml_handler):
-    """Test XMLHandler._cache_iter() with label-based filtering."""
+def test_cache_iter_label_none_raises(xml_handler):
+    """Test _cache_iter raises ValueError for Schema with label=None when tag_elements provided."""
     from plexosdb.enums import Schema
 
-    # This exercises the code path where label validation occurs
-    element_type = Schema.Objects
-
-    if element_type.label:
-        # Create tag_elements dict with the label
-        elements = list(xml_handler._cache_iter(element_type, **{element_type.label: 1}))
-        assert isinstance(elements, list)
+    # Schema.CollectionReport has label=None; passing tag_elements should raise
+    with pytest.raises(ValueError, match="has no label"):
+        list(xml_handler._cache_iter(Schema.CollectionReport, some_tag=1))
