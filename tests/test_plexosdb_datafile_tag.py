@@ -179,3 +179,87 @@ def test_add_datafile_tag_returns_int_result(
 
     assert result is not None
     assert isinstance(result, int)
+
+
+def test_add_datafile_tag_with_datafile_name_succeeds(db_with_topology: PlexosDB) -> None:
+    """Tagging by DataFile object name should work without filename lookup."""
+    from plexosdb import ClassEnum
+
+    datafile_name = "NamedDatafile"
+    datafile_id = db_with_topology.add_object(ClassEnum.DataFile, datafile_name)
+
+    property_data_id = db_with_topology.add_property(
+        ClassEnum.Generator, "thermal-01", "Max Capacity", 100.0, band=1
+    )
+
+    result = db_with_topology.add_datafile_tag(property_data_id, datafile_name=datafile_name)
+
+    assert isinstance(result, int)
+    assert db_with_topology.check_tag_exists(property_data_id, datafile_id)
+
+
+def test_add_datafile_tag_with_datafile_id_succeeds(db_with_topology: PlexosDB) -> None:
+    """Tagging by DataFile object id should work directly."""
+    from plexosdb import ClassEnum
+
+    datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "IdDatafile")
+
+    property_data_id = db_with_topology.add_property(
+        ClassEnum.Generator, "thermal-01", "Max Capacity", 100.0, band=1
+    )
+
+    result = db_with_topology.add_datafile_tag(property_data_id, datafile_id=datafile_id)
+
+    assert isinstance(result, int)
+    assert db_with_topology.check_tag_exists(property_data_id, datafile_id)
+
+
+def test_add_datafile_tag_prioritizes_datafile_id_over_name_or_path(db_with_topology: PlexosDB) -> None:
+    """When multiple selectors are provided, datafile_id should take precedence."""
+    from plexosdb import ClassEnum
+
+    preferred_id = db_with_topology.add_object(ClassEnum.DataFile, "PreferredDatafile")
+    db_with_topology.add_object(ClassEnum.DataFile, "OtherDatafile")
+
+    property_data_id = db_with_topology.add_property(
+        ClassEnum.Generator, "thermal-01", "Max Capacity", 100.0, band=1
+    )
+
+    result = db_with_topology.add_datafile_tag(
+        property_data_id,
+        "this/path/does/not/exist.csv",
+        datafile_name="OtherDatafile",
+        datafile_id=preferred_id,
+    )
+
+    assert isinstance(result, int)
+    assert db_with_topology.check_tag_exists(property_data_id, preferred_id)
+
+
+def test_add_datafile_tag_replace_existing_only_replaces_datafile_tags(db_with_topology: PlexosDB) -> None:
+    """Replacing a DataFile tag should not remove tags from other classes."""
+    from plexosdb import ClassEnum
+
+    old_datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "OldDatafileTag")
+    new_datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "NewDatafileTag")
+    scenario_id = db_with_topology.add_scenario("ScenarioToKeep")
+
+    property_data_id = db_with_topology.add_property(
+        ClassEnum.Generator, "thermal-01", "Fuel Price", 7.0, band=1
+    )
+
+    db_with_topology.add_datafile_tag(property_data_id, datafile_id=old_datafile_id)
+    db_with_topology._db.execute(
+        "INSERT INTO t_tag(data_id, object_id) VALUES (?, ?)",
+        (property_data_id, scenario_id),
+    )
+
+    db_with_topology.add_datafile_tag(
+        property_data_id,
+        datafile_id=new_datafile_id,
+        replace_existing=True,
+    )
+
+    assert not db_with_topology.check_tag_exists(property_data_id, old_datafile_id)
+    assert db_with_topology.check_tag_exists(property_data_id, new_datafile_id)
+    assert db_with_topology.check_tag_exists(property_data_id, scenario_id)

@@ -614,28 +614,59 @@ class PlexosDB:
         """Add a custom column to a class."""
         raise NotImplementedError  # pragma: no cover
 
+    def _add_tag(self, data_id: int, object_id: int) -> None:
+        """Add a tag linking a data record to an object if it doesn't already exist."""
+        if not self.check_tag_exists(data_id, object_id):
+            self._db.execute(
+                "INSERT INTO t_tag(data_id, object_id) VALUES (?, ?)",
+                (data_id, object_id),
+            )
+
+    def _delete_class_tags(self, data_id: int, class_enum: ClassEnum) -> None:
+        """Delete tags for a specific class on a data record."""
+        class_id = self.get_class_id(class_enum)
+        self._db.execute(
+            """DELETE FROM t_tag
+               WHERE data_id = ? AND object_id IN (
+                   SELECT object_id FROM t_object WHERE class_id = ?
+               )""",
+            (data_id, class_id),
+        )
+
     def add_datafile_tag(
         self,
         data_id: int,
-        file_path: str,
+        file_path: str | None = None,
         /,
         *,
         description: str | None = None,
+        datafile_name: str | None = None,
+        datafile_id: int | None = None,
+        replace_existing: bool = False,
     ) -> int:
         """Add a Data File tag to a property data record.
 
-        Creates a link between a property data record and a DataFile object
-        by finding the DataFile object that has a Filename property matching
-        the provided file path.
+        Creates a link between a property data record and a DataFile object.
+        The DataFile can be resolved from one of:
+        - ``datafile_id`` (explicit object id)
+        - ``datafile_name`` (object name)
+        - ``file_path`` (find DataFile object that has matching Filename property)
 
         Parameters
         ----------
         data_id : int
             The data ID of the property to tag
-        file_path : str
-            The file path to link to, must match a DataFile's Filename property
+        file_path : str | None
+            Optional file path used to resolve the DataFile object via its Filename property
         description : str, optional
             Optional description for the tag (currently unused)
+        datafile_name : str | None, optional
+            Optional DataFile object name to tag directly
+        datafile_id : int | None, optional
+            Optional DataFile object id to tag directly
+        replace_existing : bool, optional
+            If True, remove existing DataFile-class tags before adding the new one.
+            Tags from other classes are preserved.
 
         Returns
         -------
@@ -645,32 +676,277 @@ class PlexosDB:
         Raises
         ------
         ValueError
-            If no DataFile with the matching file path is found
+            If a DataFile object cannot be resolved
         """
-        # Get the class_id for DataFile
+        _ = description
         datafile_class_id = self.get_class_id(ClassEnum.DataFile)
 
-        # Find the DataFile object that has a Filename property matching the file_path
-        # The file_path is stored in t_text table when add_property is called with datafile_text
-        query = """
+        if not self.check_data_id_exist(data_id):
+            raise ValueError(f"data_id {data_id} was not found")
+
+        # Resolve DataFile object id using priority: datafile_id > datafile_name > file_path
+        resolved_datafile_id: int | None = None
+
+        if datafile_id is not None:
+            row = self._db.fetchone(
+                "SELECT object_id FROM t_object WHERE object_id = ? AND class_id = ?",
+                (datafile_id, datafile_class_id),
+            )
+            if row is None:
+                raise ValueError(f"No DataFile found with object_id: {datafile_id}")
+            resolved_datafile_id = int(datafile_id)
+        elif datafile_name is not None:
+            resolved_datafile_id = self.get_object_id(ClassEnum.DataFile, datafile_name)
+        elif file_path is not None:
+            query = """
             SELECT DISTINCT m.child_object_id
             FROM t_text txt
             JOIN t_data d ON txt.data_id = d.data_id
             JOIN t_membership m ON d.membership_id = m.membership_id
             WHERE txt.value = ? AND txt.class_id = ? AND m.child_class_id = ?
-        """
-        result = self._db.fetchone(query, (file_path, datafile_class_id, datafile_class_id))
+            """
+            result = self._db.fetchone(query, (file_path, datafile_class_id, datafile_class_id))
 
-        if result is None:
-            raise ValueError(f"No DataFile found with Filename: {file_path}")
+            if result is None:
+                raise ValueError(f"No DataFile found with Filename: {file_path}")
 
-        datafile_object_id = result[0]
+            resolved_datafile_id = result[0]
+        else:
+            raise ValueError("Pass one of datafile_id, datafile_name, or file_path")
 
-        # Create the tag by inserting into t_tag
-        tag_query = "INSERT INTO t_tag(data_id, object_id) VALUES (?, ?)"
-        self._db.execute(tag_query, (data_id, datafile_object_id))
+        assert resolved_datafile_id is not None
+
+        if replace_existing:
+            self._delete_class_tags(data_id, ClassEnum.DataFile)
+
+        self._add_tag(data_id, resolved_datafile_id)
 
         return data_id
+
+    def update_property(  # noqa: C901
+        self,
+        object_class_enum: ClassEnum,
+        /,
+        object_name: str,
+        property_name: str,
+        *,
+        value: str | int | float | None = None,
+        scenario: str | None = "",
+        band: int | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        datafile_text: str | None = None,
+        datafile_object: str | int | None = None,
+        timeslice: str | None = None,
+        collection_enum: CollectionEnum | None = None,
+        parent_class_enum: ClassEnum | None = None,
+        parent_object_name: str | None = None,
+        memo: str | None = None,
+    ) -> int:
+        """Update or add a property for an object.
+
+        Behavior:
+        1. Search for any existing properties matching the provided object/collection/property.
+           - If multiple rows are found this is ambiguous: print the rows and raise a RuntimeError.
+           - If exactly one row is found, update its value and return the data_id.
+           - If no rows are found, call `add_property` to create it and return the new data_id.
+
+        The search uses the same membership resolution as `add_property` so the semantics match.
+
+        Scenario matching behavior:
+        - `scenario is None`: match only rows that do not have any scenario tag.
+        - `scenario == ""`: do not filter by scenario (all scenario states).
+        - `scenario is not None and scenario != ""`: match rows tagged with that specific scenario.
+        """
+        # Resolve defaults to mirror add_property behavior
+
+        if not self.check_object_exists(object_class_enum, object_name):
+            msg = f"Object = `{object_name}` does not exist on the system. "
+            f"Check available objects for class `{object_class_enum}` using `list_objects_by_class`"
+            raise NotFoundError(msg)
+        _ = self.get_object_id(object_class_enum, object_name)
+
+        if not collection_enum:
+            collection_enum = get_default_collection(object_class_enum)
+
+        parent_class_enum = parent_class_enum or ClassEnum.System
+
+        membership_id = resolve_membership_id(
+            self,
+            object_name,
+            object_class=object_class_enum,
+            collection=collection_enum,
+            parent_class=parent_class_enum,
+            parent_object_name=parent_object_name,
+        )
+
+        # Find existing property rows for this membership and property
+        property_id = self.get_property_id(
+            property_name,
+            parent_class_enum=parent_class_enum,
+            child_class_enum=object_class_enum,
+            collection_enum=collection_enum,
+        )
+
+        # Build a query that optionally filters by band, dates, timeslice and scenario
+        joins: list[str] = []
+        where_clauses: list[str] = ["membership_id = ?", "property_id = ?"]
+        params: list[Any] = [membership_id, property_id]
+
+        if band is not None:
+            joins.append("JOIN t_band b ON d.data_id = b.data_id")
+            where_clauses.append("b.band_id = ?")
+            params.append(band)
+
+        if date_from is not None:
+            joins.append("JOIN t_date_from df ON d.data_id = df.data_id")
+            where_clauses.append("df.date = ?")
+            params.append(date_from.isoformat())
+
+        if date_to is not None:
+            joins.append("JOIN t_date_to dt ON d.data_id = dt.data_id")
+            where_clauses.append("dt.date = ?")
+            params.append(date_to.isoformat())
+
+        if timeslice is not None:
+            timeslice_class_id = self.get_class_id(ClassEnum.Timeslice)
+            joins.append("JOIN t_text ts ON d.data_id = ts.data_id")
+            where_clauses.append("ts.class_id = ? AND ts.value = ?")
+            params.extend([timeslice_class_id, timeslice])
+
+        scenario_checker = scenario == ""
+
+        if scenario is None:
+            # Explicitly target rows with no Scenario tag while allowing other tag classes.
+            scenario_class_id = self.get_class_id(ClassEnum.Scenario)
+            where_clauses.append(
+                """NOT EXISTS (
+                    SELECT 1
+                    FROM t_tag st
+                    JOIN t_object so ON so.object_id = st.object_id
+                    WHERE st.data_id = d.data_id
+                      AND so.class_id = ?
+                )"""
+            )
+            params.append(scenario_class_id)
+            scenario_checker = True
+
+        if scenario not in (None, ""):  # scenario_checker = False
+            scenario_name = scenario
+            assert scenario_name is not None
+            # If the scenario doesn't exist there can be no matching rows
+            if not self.check_scenario_exists(scenario_name):
+                rows = []
+                scenario_checker = False
+            else:
+                scenario_id = self.get_scenario_id(scenario_name)
+                joins.append("JOIN t_tag tg ON d.data_id = tg.data_id")
+                where_clauses.append("tg.object_id = ?")
+                params.append(scenario_id)
+                scenario_checker = True
+
+        if scenario_checker:
+            # if scenario_checker is False we already know there are no matching rows and can skip the query
+            join_sql = " ".join(joins)
+            where_sql = " AND ".join(where_clauses)
+            query = f"SELECT d.data_id, d.value FROM {Schema.Data.name} d {join_sql} WHERE {where_sql}"
+            rows = self._db.fetchall(query, tuple(params))
+
+        if len(rows) > 1:
+            # Ambiguous: print rows and abort
+            print(
+                "Ambiguous existing property rows for "
+                f"{object_name}.{property_name}: found {len(rows)} rows: "
+                "(data id, value)"
+            )
+            for r in rows:
+                print(r)
+            raise RuntimeError(
+                "Ambiguous property: multiple existing rows found; manual resolution required."
+            )
+
+        if len(rows) == 1:
+            data_id = int(rows[0][0])
+            update_q = f"UPDATE {Schema.Data.name} SET value = ? WHERE data_id = ?"
+            if value is not None:
+                self._db.execute(update_q, (value, data_id))
+
+            # Update optional related metadata
+            if date_from or date_to:
+                self._handle_dates(data_id, date_from, date_to)
+            if datafile_text is not None:
+                self._upsert_data_text(ClassEnum.DataFile, data_id, datafile_text)
+            if datafile_object is not None:
+                if isinstance(datafile_object, int):
+                    self.add_datafile_tag(
+                        data_id,
+                        datafile_id=datafile_object,
+                        replace_existing=True,
+                    )
+                else:
+                    self.add_datafile_tag(
+                        data_id,
+                        datafile_name=datafile_object,
+                        replace_existing=True,
+                    )
+            if timeslice:
+                self.add_text(ClassEnum.Timeslice, timeslice, data_id)
+            if band:
+                # naive: attempt to add band (may create duplicates)
+                self.add_band(data_id, band)
+            if memo is not None:
+                self._upsert_data_memo(data_id, memo)
+
+            return data_id
+
+        # No existing row: create one
+        logger.info(
+            "No existing property found for object "
+            f"`{object_name}` and property `{property_name}`. "
+            "Adding new property."
+        )
+        return self.add_property(
+            object_class_enum,
+            object_name,
+            property_name,
+            value if value is not None else 0,
+            scenario=scenario,
+            band=band,
+            date_from=date_from,
+            date_to=date_to,
+            datafile_text=datafile_text,
+            datafile_object=datafile_object,
+            timeslice=timeslice,
+            collection_enum=collection_enum,
+            parent_class_enum=parent_class_enum,
+            parent_object_name=parent_object_name,
+            memo=memo,
+        )
+
+    def _upsert_data_text(self, text_class: ClassEnum, data_id: int, text_value: str | int | float) -> None:
+        """Insert or update text metadata for a given (data_id, text_class)."""
+        class_id = self.get_class_id(text_class)
+        row = self._db.fetchone(
+            "SELECT 1 FROM t_text WHERE data_id = ? AND class_id = ?",
+            (data_id, class_id),
+        )
+        if row:
+            self._db.execute(
+                "UPDATE t_text SET value = ? WHERE data_id = ? AND class_id = ?",
+                (text_value, data_id, class_id),
+            )
+            return
+        self.add_text(text_class, text_value, data_id)
+        return
+
+    def _upsert_data_memo(self, data_id: int, memo_value: str) -> None:
+        """Insert or update memo text for a property data row."""
+        exists = self._db.fetchone("SELECT 1 FROM t_memo_data WHERE data_id = ?", (data_id,))
+        if exists:
+            self._db.execute("UPDATE t_memo_data SET value = ? WHERE data_id = ?", (memo_value, data_id))
+            return
+        self._db.execute("INSERT INTO t_memo_data(data_id, value) VALUES (?, ?)", (data_id, memo_value))
+        return
 
     def add_membership(
         self,
@@ -1196,7 +1472,7 @@ class PlexosDB:
                 (data_id, date_to.isoformat()),
             )
 
-    def add_property(
+    def add_property(  # noqa: C901
         self,
         object_class_enum: ClassEnum,
         /,
@@ -1209,15 +1485,17 @@ class PlexosDB:
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         datafile_text: str | None = None,
+        datafile_object: str | int | None = None,
         timeslice: str | None = None,
         collection_enum: CollectionEnum | None = None,
         parent_class_enum: ClassEnum | None = None,
         parent_object_name: str | None = None,
+        memo: str | None = None,
     ) -> int:
         """Add a property for a given object in the database.
 
         Adds a property with the specified value to an object, optionally associating
-        it with a scenario, band, date range, datafile text, and timeslice data.
+        it with a scenario, band, date range, datafile text, timeslice data, and memo.
 
         Parameters
         ----------
@@ -1250,6 +1528,8 @@ class PlexosDB:
         parent_object_name : str | None, optional
             Name of the parent object. If None, membership is resolved from
             `parent_class_enum`, `collection_enum`, and `object_name`.
+        memo : str | None, optional
+            Optional memo text to attach to this property data row.
 
         Returns
         -------
@@ -1341,11 +1621,20 @@ class PlexosDB:
         if datafile_text:
             self.add_text(ClassEnum.DataFile, datafile_text, data_id)
 
+        if datafile_object is not None:
+            if isinstance(datafile_object, int):
+                self.add_datafile_tag(data_id, datafile_id=datafile_object)
+            else:
+                self.add_datafile_tag(data_id, datafile_name=datafile_object)
+
         if timeslice:
             self.add_text(ClassEnum.Timeslice, timeslice, data_id)
 
         if band:
             self.add_band(data_id, band)
+
+        if memo is not None:
+            self._upsert_data_memo(data_id, memo)
 
         return data_id
 
@@ -4793,22 +5082,6 @@ class PlexosDB:
 
     def update_properties(self, updates: list[dict[str, Any]]) -> None:
         """Update multiple properties in a single transaction."""
-        raise NotImplementedError  # pragma: no cover
-
-    def update_property(
-        self,
-        object_name: str,
-        property_name: str,
-        new_value: str | None,
-        /,
-        *,
-        object_class: ClassEnum,
-        scenario: str | None = None,
-        band: str | None = None,
-        collection: CollectionEnum | None = None,
-        parent_class: ClassEnum | None = None,
-    ) -> None:
-        """Update a property value for a given object."""
         raise NotImplementedError  # pragma: no cover
 
     def update_scenario(
