@@ -158,3 +158,245 @@ def test_add_property_with_different_bands_succeeds(db_with_topology, band):
     db_with_topology.add_property(ClassEnum.Generator, "thermal-01", "Heat Rate", 10.0 + band, band=band)
     properties = db_with_topology.get_object_properties(ClassEnum.Generator, "thermal-01")
     assert any(p["property"] == "Heat Rate" and p.get("band") == band for p in properties)
+
+
+def test_update_property_with_scenario_none_updates_only_untagged_row(db_with_topology):
+    tagged_data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        100.0,
+        scenario="Base",
+        band=1,
+    )
+    untagged_data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        90.0,
+        band=1,
+    )
+
+    updated_data_id = db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Max Capacity",
+        value=120.0,
+        scenario=None,
+        band=1,
+    )
+
+    assert updated_data_id == untagged_data_id
+    assert (
+        db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (tagged_data_id,))[0][0] == 100.0
+    )
+    assert (
+        db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (untagged_data_id,))[0][0]
+        == 120.0
+    )
+
+
+def test_update_property_with_scenario_none_allows_non_scenario_tags(db_with_topology):
+    datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "FuelProfile")
+    data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        90.0,
+        band=1,
+    )
+    assert db_with_topology.add_datafile_tag(data_id, datafile_id=datafile_id) == data_id
+
+    updated_data_id = db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Max Capacity",
+        value=121.0,
+        scenario=None,
+        band=1,
+    )
+
+    assert updated_data_id == data_id
+    assert db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (data_id,))[0][0] == 121.0
+
+
+def test_update_property_with_explicit_scenario_updates_only_that_scenario(db_with_topology):
+    tagged_data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        100.0,
+        scenario="Base",
+        band=1,
+    )
+    untagged_data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        90.0,
+        band=1,
+    )
+
+    updated_data_id = db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Max Capacity",
+        value=150.0,
+        scenario="Base",
+        band=1,
+    )
+
+    assert updated_data_id == tagged_data_id
+    assert (
+        db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (tagged_data_id,))[0][0] == 150.0
+    )
+    assert (
+        db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (untagged_data_id,))[0][0]
+        == 90.0
+    )
+
+
+def test_update_property_with_scenario_none_inserts_when_only_tagged_rows_exist(db_with_topology):
+    tagged_data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        100.0,
+        scenario="Base",
+        band=1,
+    )
+
+    new_data_id = db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Max Capacity",
+        value=130.0,
+        scenario=None,
+        band=1,
+    )
+
+    assert new_data_id != tagged_data_id
+    assert db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (new_data_id,))[0][0] == 130.0
+    assert not db_with_topology.query("SELECT 1 FROM t_tag WHERE data_id = ?", (new_data_id,))
+
+
+def test_update_property_with_empty_scenario_matches_all_scenarios(db_with_topology):
+    tagged_data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        90.0,
+        scenario="Base",
+        band=1,
+    )
+
+    updated_data_id = db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Max Capacity",
+        value=111.0,
+        scenario="",
+        band=1,
+    )
+
+    assert updated_data_id == tagged_data_id
+    assert (
+        db_with_topology.query("SELECT value FROM t_data WHERE data_id = ?", (tagged_data_id,))[0][0] == 111.0
+    )
+
+
+def test_update_property_adds_or_revises_memo_for_existing_row(db_with_topology):
+    data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        100.0,
+        band=1,
+    )
+
+    db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Max Capacity",
+        value=101.0,
+        scenario=None,
+        band=1,
+        memo="first memo",
+    )
+    assert (
+        db_with_topology.query("SELECT value FROM t_memo_data WHERE data_id = ?", (data_id,))[0][0]
+        == "first memo"
+    )
+
+    db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Max Capacity",
+        value=102.0,
+        scenario=None,
+        band=1,
+        memo="revised memo",
+    )
+    assert (
+        db_with_topology.query("SELECT value FROM t_memo_data WHERE data_id = ?", (data_id,))[0][0]
+        == "revised memo"
+    )
+
+
+def test_update_property_adds_memo_when_creating_new_row(db_with_topology):
+    data_id = db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Fuel Price",
+        value=7.5,
+        scenario=None,
+        band=1,
+        memo="new row memo",
+    )
+
+    assert (
+        db_with_topology.query("SELECT value FROM t_memo_data WHERE data_id = ?", (data_id,))[0][0]
+        == "new row memo"
+    )
+
+
+def test_add_property_with_datafile_object_creates_datafile_tag(db_with_topology):
+    datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "FuelProfileObject")
+
+    data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Max Capacity",
+        100.0,
+        band=1,
+        datafile_object="FuelProfileObject",
+    )
+
+    assert db_with_topology.check_tag_exists(data_id, datafile_id)
+
+
+def test_update_property_with_datafile_object_replaces_existing_datafile_tag(db_with_topology):
+    old_datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "OldDatafile")
+    new_datafile_id = db_with_topology.add_object(ClassEnum.DataFile, "NewDatafile")
+
+    data_id = db_with_topology.add_property(
+        ClassEnum.Generator,
+        "thermal-01",
+        "Fuel Price",
+        7.0,
+        band=1,
+        datafile_object="OldDatafile",
+    )
+
+    db_with_topology.update_property(
+        ClassEnum.Generator,
+        object_name="thermal-01",
+        property_name="Fuel Price",
+        value=8.0,
+        scenario=None,
+        band=1,
+        datafile_object="NewDatafile",
+    )
+
+    assert not db_with_topology.check_tag_exists(data_id, old_datafile_id)
+    assert db_with_topology.check_tag_exists(data_id, new_datafile_id)

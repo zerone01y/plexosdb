@@ -70,7 +70,8 @@ ORDER BY
 	COALESCE(tag_agg.datafile_tag,
              text_agg.datafile_text) AS filename,
 	tag_agg.scenario_tag AS scenario,
-	memo.value AS memo
+	memo.value AS memo,
+	d.data_id AS _data_id
 FROM
 	t_data d
 --- mem ---
